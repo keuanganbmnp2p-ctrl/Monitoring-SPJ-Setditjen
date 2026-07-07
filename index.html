@@ -383,6 +383,9 @@
 /* ======================= CONFIG ======================= */
 const SHEET_ID = '1QBXsy8ik5v1xwzuBzLJNude9hgDjKLrAfH8ZZxhy40Q';
 const TARGET_SHEETS = ['Form Responses 1', 'Jawaban formulir 1', 'Sheet1', 'SPBY UP/TUP', 'KKP', 'LS', 'SPBY TUP PF']; 
+// Kumpulan sheet yang DIUTAMAKAN sebagai sumber Bukti Transfer & Status (karena di sinilah verifikator bekerja)
+const TRACKING_SHEETS = ['SPBY UP/TUP', 'KKP', 'LS', 'SPBY TUP PF'];
+
 const REFRESH_MS = 5 * 60 * 1000;
 
 let RAW_ROWS = [];
@@ -470,7 +473,7 @@ function classify(rawStatus){
 }
 
 /* ======================= MULTI-SHEET FETCH ======================= */
-function parseTable(table){
+function parseTable(table, sheetName){
   const cols = table.cols.map(c => c.label || '');
   const idx = {
     no: findColIndex(cols, ['column 1', 'no']),
@@ -479,14 +482,14 @@ function parseTable(table){
     uraian: findColIndex(cols, ['uraian']),
     nilai: findColIndex(cols, ['nilai']),
     kuitansi: findColIndex(cols, ['kuitansi']),
-    cms: findColIndex(cols, ['upload file cms']),
+    cms: findColIndex(cols, ['upload file cms', 'cms']),
     pic: findColIndex(cols, ['nama pic']),
     mak: findColIndex(cols, ['mak']),
     billing: findColIndex(cols, ['billing']),
     verifikator: findColIndex(cols, ['verifikator']),
     status: findColIndex(cols, ['status']),
-    // Penambahan variasi nama header untuk kolom bukti
-    bukti: findColIndex(cols, ['bukti transfer', 'bukti', 'upload bukti', 'link bukti', 'file bukti']),
+    // Penambahan variasi ekstra untuk menangkap seluruh kemungkinan nama kolom Bukti Transfer di sheet verifikator
+    bukti: findColIndex(cols, ['bukti transfer', 'upload file bukti transfer', 'link bukti', 'bukti bayar', 'bukti', 'upload bukti']),
     keterangan: findColIndex(cols, ['keterangan']),
   };
 
@@ -516,6 +519,7 @@ function parseTable(table){
       statusRaw: status,
       bukti: strVal(get(idx.bukti)),
       keterangan: strVal(get(idx.keterangan)),
+      sheetSource: sheetName // Menandai asal data ini dari sheet mana
     });
   });
   return rows;
@@ -536,7 +540,7 @@ async function fetchAllSheets(){
       if (json.status === 'error') return []; 
       if (!json.table || !json.table.cols) return [];
       
-      return parseTable(json.table);
+      return parseTable(json.table, sheetName);
     } catch(e) {
       return [];
     }
@@ -547,27 +551,34 @@ async function fetchAllSheets(){
     combinedRows = combinedRows.concat(sheetRows);
   });
 
-  // SMART MERGE: Menghindari data tertimpa secara paksa antar sheet
+  // SMART MERGE & PRIORITIZATION
   const rowMap = new Map();
   combinedRows.forEach(r => {
-    // Key gabungan dibersihkan dari spasi lebih agar toleran terhadap typo minor
-    const uraianClean = (r.uraian || '').toLowerCase().trim().replace(/\s+/g, ' ').substring(0, 40);
-    const key = r.nilai + '_' + uraianClean;
+    const uraianClean = (r.uraian || '').toLowerCase().trim().replace(/\s+/g, ' ').substring(0, 50);
+    const key = r.nilai + '_' + uraianClean; // Menggabungkan nominal dan 50 huruf pertama uraian sbg Identifier
     
     if (rowMap.has(key)) {
       const existing = rowMap.get(key);
       
-      // Mengisi properti yang masih kosong dari sheet sebelumnya
-      if (!existing.bukti && r.bukti) existing.bukti = r.bukti;
-      if (r.bukti && r.bukti.length > (existing.bukti||'').length) existing.bukti = r.bukti;
+      // Mengecek apakah baris baru ini (r) berasal dari 4 sheet utama
+      const isRTracking = TRACKING_SHEETS.includes(r.sheetSource);
+      const isExistingTracking = TRACKING_SHEETS.includes(existing.sheetSource);
+
+      // PRIORITAS UTAMA: Jika baris data yang baru ditarik berasal dari 4 sheet utama, TIMPA APAPUN yg ada di Form Responses.
+      if (isRTracking) {
+        if (r.bukti) existing.bukti = r.bukti;
+        if (r.statusRaw && r.statusRaw !== 'Belum Diverifikasi') existing.statusRaw = r.statusRaw;
+        if (r.verifikator && r.verifikator !== 'Belum ditentukan') existing.verifikator = r.verifikator;
+        if (r.kuitansi) existing.kuitansi = r.kuitansi;
+        if (r.cms) existing.cms = r.cms;
+        if (r.billing) existing.billing = r.billing;
+        existing.sheetSource = r.sheetSource; // Update identitas pemegang data utama
       
-      if (r.statusRaw && r.statusRaw !== 'Belum Diverifikasi') existing.statusRaw = r.statusRaw;
-      if (r.verifikator && r.verifikator !== 'Belum ditentukan') existing.verifikator = r.verifikator;
-      
-      if (!existing.kuitansi && r.kuitansi) existing.kuitansi = r.kuitansi;
-      if (!existing.cms && r.cms) existing.cms = r.cms;
-      if (!existing.billing && r.billing) existing.billing = r.billing;
-      if (!existing.timestamp && r.timestamp) existing.timestamp = r.timestamp;
+      // PRIORITAS KEDUA: Jika keduanya bukan berasal dari sheet tracking, gabungkan data secara normal
+      } else if (!isExistingTracking) {
+        if (!existing.bukti && r.bukti) existing.bukti = r.bukti;
+        if (r.statusRaw && r.statusRaw !== 'Belum Diverifikasi') existing.statusRaw = r.statusRaw;
+      }
 
     } else {
       rowMap.set(key, r);
@@ -578,7 +589,6 @@ async function fetchAllSheets(){
 }
 
 /* ======================= LINK MULTI-PARSER ======================= */
-// Fungsi cerdas untuk mendeteksi banyak file (yang dipisah koma) menjadi beberapa tombol
 function makeLink(rawStr, label, cssClass = '') {
   if (!rawStr) return '';
   const parts = rawStr.split(',').map(s => s.trim()).filter(s => s.length > 2);
@@ -586,12 +596,10 @@ function makeLink(rawStr, label, cssClass = '') {
 
   const validLinks = parts.filter(s => s.includes('http') || s.includes('drive.google.com'));
   
-  // Jika kolom ternyata hanya diisi teks (contoh: "Ada di Map KKP"), tampilkan teksnya
   if (validLinks.length === 0) {
     return `<span style="color:#A86508;font-size:12px;">${rawStr}</span>`;
   }
 
-  // Jika berupa link, parsing dan beri angka urut jika lebih dari 1 file
   return validLinks.map((url, i) => {
     let finalUrl = url;
     if (!finalUrl.startsWith('http')) finalUrl = 'https://' + finalUrl;
@@ -861,7 +869,6 @@ function renderTable(){
 
   document.getElementById('tableBody').innerHTML = pageRows.map(r => {
     
-    // PEMROSESAN MULTIPLE LINK MELALUI FUNGSI makeLink()
     const buktiOutput = makeLink(r.bukti, 'Lihat Bukti', 'btn-bukti') || '<span style="color:#B7C9C5;font-weight:normal;">Belum tersedia</span>';
     
     const kuitansiLinks = makeLink(r.kuitansi, 'Kuitansi');
