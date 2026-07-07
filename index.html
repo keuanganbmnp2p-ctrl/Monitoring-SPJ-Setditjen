@@ -201,6 +201,8 @@
     text-decoration:none;font-size:13px;margin:2px 4px 2px 0;
   }
   td.links a:hover{background:var(--teal-900);}
+  td.links a.btn-bukti{background:var(--amber-600);color:#fff;}
+  td.links a.btn-bukti:hover{background:#9e5a02;}
   
   .badge{
     display:inline-flex;align-items:center;gap:5px;padding:6px 12px;border-radius:100px;font-size:13px;
@@ -251,7 +253,7 @@
 
 <div id="loadingOverlay">
   <div class="spinner"></div>
-  <p>Mengambil data terbaru dari sheet…</p>
+  <p>Mengambil data dari beberapa sheet…</p>
 </div>
 
 <div class="app">
@@ -349,9 +351,8 @@
             <th data-key="mak">MAK <span class="arrow"></span></th>
             <th data-key="verifikator">Verifikator <span class="arrow"></span></th>
             <th data-key="status">Status <span class="arrow"></span></th>
-            <!-- Pastikan span arrow disisipkan di kolom baru -->
-            <th data-key="bukti">Bukti Transfer <span class="arrow"></span></th>
-            <th data-key="berkas">Berkas <span class="arrow"></span></th>
+            <th data-key="bukti">Bukti Transfer</th>
+            <th data-key="berkas">Berkas</th>
           </tr>
         </thead>
         <tbody id="tableBody"></tbody>
@@ -375,7 +376,8 @@
 <script>
 /* ======================= CONFIG ======================= */
 const SHEET_ID = '1QBXsy8ik5v1xwzuBzLJNude9hgDjKLrAfH8ZZxhy40Q';
-const SHEET_NAME_CANDIDATES = ['Form Responses 1', 'Form responses 1', 'Jawaban formulir 1', 'Sheet1', 'SPBY UP/TUP', null]; 
+// PERUBAHAN: Menentukan semua sheet yang akan ditarik datanya
+const TARGET_SHEETS = ['Form Responses 1', 'Jawaban formulir 1', 'Sheet1', 'SPBY UP/TUP', 'KKP', 'LS', 'SPBY TUP PF']; 
 const REFRESH_MS = 5 * 60 * 1000;
 
 let RAW_ROWS = [];
@@ -385,7 +387,7 @@ let currentPage = 1;
 const PAGE_SIZE = 25;
 let trendDays = 30;
 
-// Konfigurasi Font Global untuk Chart.js
+// Konfigurasi Font Global Chart.js
 Chart.defaults.font.family = "'Century Gothic', sans-serif";
 Chart.defaults.font.weight = 'bold';
 Chart.defaults.font.size = 13;
@@ -462,37 +464,12 @@ function classify(rawStatus){
   return { group:'proses', label: s };
 }
 
-/* ======================= FETCH ======================= */
-async function fetchSheet(){
-  let lastErr = null;
-  for (const name of SHEET_NAME_CANDIDATES){
-    try{
-      const url = name
-        ? `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(name)}`
-        : `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json`;
-      const res = await fetch(url, { cache: 'no-store' });
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const text = await res.text();
-      const jsonStr = text.substring(text.indexOf('{'), text.lastIndexOf('}') + 1);
-      const json = JSON.parse(jsonStr);
-      
-      if (json.status === 'error') {
-        const errMsg = json.errors && json.errors[0] ? json.errors[0].message : 'Akses ditolak atau sheet tidak ditemukan.';
-        throw new Error(`Respons Google: ${errMsg}`);
-      }
-
-      if (!json.table || !json.table.cols) throw new Error('Format tabel tidak ditemukan.');
-      return json.table;
-    }catch(e){ lastErr = e; }
-  }
-  throw lastErr || new Error('Tidak dapat memuat sheet');
-}
-
+/* ======================= MULTI-SHEET FETCH ======================= */
 function parseTable(table){
   const cols = table.cols.map(c => c.label || '');
   const idx = {
-    no: findColIndex(cols, ['column 1']),
-    timestamp: findColIndex(cols, ['timestamp']),
+    no: findColIndex(cols, ['column 1', 'no']),
+    timestamp: findColIndex(cols, ['timestamp', 'tanggal']),
     timKerja: findColIndex(cols, ['tim kerja']),
     uraian: findColIndex(cols, ['uraian']),
     nilai: findColIndex(cols, ['nilai']),
@@ -503,7 +480,7 @@ function parseTable(table){
     billing: findColIndex(cols, ['billing']),
     verifikator: findColIndex(cols, ['verifikator']),
     status: findColIndex(cols, ['status']),
-    bukti: findColIndex(cols, ['bukti transfer', 'bukti']), // Pencarian indeks bukti transfer
+    bukti: findColIndex(cols, ['bukti transfer', 'bukti']),
     keterangan: findColIndex(cols, ['keterangan']),
   };
 
@@ -515,10 +492,11 @@ function parseTable(table){
     const timestamp = tsCell ? parseGvizDate(tsCell.v, tsCell.f) : null;
     const uraian = strVal(get(idx.uraian));
     const status = strVal(get(idx.status));
+    const noVal = strVal(get(idx.no));
     
     if (!uraian && !status && !timestamp) return; 
     rows.push({
-      no: strVal(get(idx.no)) || String(i+1),
+      no: noVal || String(i+1),
       timestamp,
       timKerja: strVal(get(idx.timKerja)) || '–',
       uraian: uraian || '(tanpa uraian)',
@@ -530,11 +508,61 @@ function parseTable(table){
       billing: strVal(get(idx.billing)),
       verifikator: strVal(get(idx.verifikator)) || 'Belum ditentukan',
       statusRaw: status,
-      bukti: strVal(get(idx.bukti)), // Ekstraksi URL bukti transfer
+      bukti: strVal(get(idx.bukti)),
       keterangan: strVal(get(idx.keterangan)),
     });
   });
   return rows;
+}
+
+async function fetchAllSheets(){
+  let combinedRows = [];
+  
+  // Menarik semua sheet yang terdaftar secara pararel
+  const fetchPromises = TARGET_SHEETS.map(async (sheetName) => {
+    try {
+      const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(sheetName)}`;
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) return [];
+      const text = await res.text();
+      const jsonStr = text.substring(text.indexOf('{'), text.lastIndexOf('}') + 1);
+      const json = JSON.parse(jsonStr);
+      
+      if (json.status === 'error') return []; // Lewati jika sheet tidak ditemukan
+      if (!json.table || !json.table.cols) return [];
+      
+      return parseTable(json.table);
+    } catch(e) {
+      return [];
+    }
+  });
+  
+  const results = await Promise.all(fetchPromises);
+  results.forEach(sheetRows => {
+    combinedRows = combinedRows.concat(sheetRows);
+  });
+
+  // Sistem deduplikasi: Menggabungkan baris yang sama dari sheet form response dan sheet proses
+  const rowMap = new Map();
+  combinedRows.forEach(r => {
+    // Membentuk ID unik dari nilai dan uraian (agar sangat akurat)
+    const key = r.nilai + '_' + (r.uraian || '').toLowerCase().trim();
+    
+    if (rowMap.has(key)) {
+      const existing = rowMap.get(key);
+      // Jika data ganda, dahulukan yang punya link Bukti Transfer dan Status Terbaru
+      const existingScore = (existing.bukti ? 2 : 0) + (existing.statusRaw ? 1 : 0);
+      const newScore = (r.bukti ? 2 : 0) + (r.statusRaw ? 1 : 0);
+      
+      if (newScore > existingScore) {
+        rowMap.set(key, r);
+      }
+    } else {
+      rowMap.set(key, r);
+    }
+  });
+  
+  return Array.from(rowMap.values());
 }
 
 /* ======================= RENDER ======================= */
@@ -773,7 +801,7 @@ function getFilteredRows(){
   rows.sort((a,b) => {
     let va = a[sortState.key], vb = b[sortState.key];
     if (sortState.key === 'timestamp'){ va = va ? va.getTime() : 0; vb = vb ? vb.getTime() : 0; }
-    else if (sortState.key === 'nilai'){ /* numeric already */ }
+    else if (sortState.key === 'nilai'){ /* numerik */ }
     else if (sortState.key === 'status'){ va = classify(a.statusRaw).label; vb = classify(b.statusRaw).label; }
     else { va = (va||'').toString().toLowerCase(); vb = (vb||'').toString().toLowerCase(); }
     if (va < vb) return sortState.dir === 'asc' ? -1 : 1;
@@ -801,8 +829,8 @@ function renderTable(){
     if (r.cms) links.push(`<a href="${r.cms}" target="_blank" rel="noopener">CMS</a>`);
     if (r.billing) links.push(`<a href="${r.billing}" target="_blank" rel="noopener">Billing</a>`);
     
-    // Tampilan tombol untuk bukti transfer 
-    const buktiLink = r.bukti ? `<a href="${r.bukti}" target="_blank" rel="noopener" style="background:var(--amber-600);">Bukti Transfer</a>` : '<span style="color:#B7C9C5;font-weight:normal;">–</span>';
+    // Tampilan tombol untuk bukti transfer dibedakan warnanya agar mencolok
+    const buktiLink = r.bukti ? `<a href="${r.bukti}" target="_blank" rel="noopener" class="btn-bukti">Lihat Bukti</a>` : '<span style="color:#B7C9C5;font-weight:normal;">Belum tersedia</span>';
 
     return `<tr>
       <td>${r.no}</td>
@@ -822,7 +850,6 @@ function renderTable(){
   document.getElementById('prevPage').disabled = currentPage <= 1;
   document.getElementById('nextPage').disabled = currentPage >= totalPages;
 
-  // PERBAIKAN BUG PENYEBAB GRAFIK BLANK
   document.querySelectorAll('thead th').forEach(th => {
     const span = th.querySelector('.arrow');
     if (span) {
@@ -861,8 +888,9 @@ async function loadData(isManual){
   errBanner.style.display = 'none';
 
   try{
-    const table = await fetchSheet();
-    RAW_ROWS = parseTable(table);
+    RAW_ROWS = await fetchAllSheets();
+    if (RAW_ROWS.length === 0) throw new Error('Tidak ada data ditemukan di sheet mana pun.');
+    
     render();
     dot.className = 'dot';
     const now = new Date();
@@ -893,7 +921,6 @@ document.getElementById('nextPage').addEventListener('click', () => { currentPag
 document.querySelectorAll('thead th').forEach(th => {
   th.addEventListener('click', () => {
     const key = th.dataset.key;
-    // Jangan izinkan sortir pada kolom tanpa fitur sortir (bukti/berkas)
     if (!th.querySelector('.arrow')) return; 
     
     if (sortState.key === key) sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
