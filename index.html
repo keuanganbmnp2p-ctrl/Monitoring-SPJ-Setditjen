@@ -194,11 +194,17 @@
   td.uraian{max-width:340px;line-height:1.5; color:var(--ink-soft);}
   td.nilai{white-space:nowrap;}
   
+  td.links{
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    align-items: flex-start;
+  }
   td.links a{
     display:inline-block;
     color:var(--surface); background:var(--teal-700);
     padding: 6px 12px; border-radius: 6px;
-    text-decoration:none;font-size:13px;margin:2px 4px 2px 0;
+    text-decoration:none;font-size:13px;
   }
   td.links a:hover{background:var(--teal-900);}
   td.links a.btn-bukti{background:var(--amber-600);color:#fff;}
@@ -376,7 +382,6 @@
 <script>
 /* ======================= CONFIG ======================= */
 const SHEET_ID = '1QBXsy8ik5v1xwzuBzLJNude9hgDjKLrAfH8ZZxhy40Q';
-// PERUBAHAN: Menentukan semua sheet yang akan ditarik datanya
 const TARGET_SHEETS = ['Form Responses 1', 'Jawaban formulir 1', 'Sheet1', 'SPBY UP/TUP', 'KKP', 'LS', 'SPBY TUP PF']; 
 const REFRESH_MS = 5 * 60 * 1000;
 
@@ -480,7 +485,8 @@ function parseTable(table){
     billing: findColIndex(cols, ['billing']),
     verifikator: findColIndex(cols, ['verifikator']),
     status: findColIndex(cols, ['status']),
-    bukti: findColIndex(cols, ['bukti transfer', 'bukti']),
+    // Penambahan variasi nama header untuk kolom bukti
+    bukti: findColIndex(cols, ['bukti transfer', 'bukti', 'upload bukti', 'link bukti', 'file bukti']),
     keterangan: findColIndex(cols, ['keterangan']),
   };
 
@@ -518,7 +524,6 @@ function parseTable(table){
 async function fetchAllSheets(){
   let combinedRows = [];
   
-  // Menarik semua sheet yang terdaftar secara pararel
   const fetchPromises = TARGET_SHEETS.map(async (sheetName) => {
     try {
       const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(sheetName)}`;
@@ -528,7 +533,7 @@ async function fetchAllSheets(){
       const jsonStr = text.substring(text.indexOf('{'), text.lastIndexOf('}') + 1);
       const json = JSON.parse(jsonStr);
       
-      if (json.status === 'error') return []; // Lewati jika sheet tidak ditemukan
+      if (json.status === 'error') return []; 
       if (!json.table || !json.table.cols) return [];
       
       return parseTable(json.table);
@@ -542,21 +547,28 @@ async function fetchAllSheets(){
     combinedRows = combinedRows.concat(sheetRows);
   });
 
-  // Sistem deduplikasi: Menggabungkan baris yang sama dari sheet form response dan sheet proses
+  // SMART MERGE: Menghindari data tertimpa secara paksa antar sheet
   const rowMap = new Map();
   combinedRows.forEach(r => {
-    // Membentuk ID unik dari nilai dan uraian (agar sangat akurat)
-    const key = r.nilai + '_' + (r.uraian || '').toLowerCase().trim();
+    // Key gabungan dibersihkan dari spasi lebih agar toleran terhadap typo minor
+    const uraianClean = (r.uraian || '').toLowerCase().trim().replace(/\s+/g, ' ').substring(0, 40);
+    const key = r.nilai + '_' + uraianClean;
     
     if (rowMap.has(key)) {
       const existing = rowMap.get(key);
-      // Jika data ganda, dahulukan yang punya link Bukti Transfer dan Status Terbaru
-      const existingScore = (existing.bukti ? 2 : 0) + (existing.statusRaw ? 1 : 0);
-      const newScore = (r.bukti ? 2 : 0) + (r.statusRaw ? 1 : 0);
       
-      if (newScore > existingScore) {
-        rowMap.set(key, r);
-      }
+      // Mengisi properti yang masih kosong dari sheet sebelumnya
+      if (!existing.bukti && r.bukti) existing.bukti = r.bukti;
+      if (r.bukti && r.bukti.length > (existing.bukti||'').length) existing.bukti = r.bukti;
+      
+      if (r.statusRaw && r.statusRaw !== 'Belum Diverifikasi') existing.statusRaw = r.statusRaw;
+      if (r.verifikator && r.verifikator !== 'Belum ditentukan') existing.verifikator = r.verifikator;
+      
+      if (!existing.kuitansi && r.kuitansi) existing.kuitansi = r.kuitansi;
+      if (!existing.cms && r.cms) existing.cms = r.cms;
+      if (!existing.billing && r.billing) existing.billing = r.billing;
+      if (!existing.timestamp && r.timestamp) existing.timestamp = r.timestamp;
+
     } else {
       rowMap.set(key, r);
     }
@@ -564,6 +576,30 @@ async function fetchAllSheets(){
   
   return Array.from(rowMap.values());
 }
+
+/* ======================= LINK MULTI-PARSER ======================= */
+// Fungsi cerdas untuk mendeteksi banyak file (yang dipisah koma) menjadi beberapa tombol
+function makeLink(rawStr, label, cssClass = '') {
+  if (!rawStr) return '';
+  const parts = rawStr.split(',').map(s => s.trim()).filter(s => s.length > 2);
+  if (parts.length === 0) return '';
+
+  const validLinks = parts.filter(s => s.includes('http') || s.includes('drive.google.com'));
+  
+  // Jika kolom ternyata hanya diisi teks (contoh: "Ada di Map KKP"), tampilkan teksnya
+  if (validLinks.length === 0) {
+    return `<span style="color:#A86508;font-size:12px;">${rawStr}</span>`;
+  }
+
+  // Jika berupa link, parsing dan beri angka urut jika lebih dari 1 file
+  return validLinks.map((url, i) => {
+    let finalUrl = url;
+    if (!finalUrl.startsWith('http')) finalUrl = 'https://' + finalUrl;
+    const suffix = validLinks.length > 1 ? ` ${i + 1}` : '';
+    return `<a href="${finalUrl}" target="_blank" rel="noopener" class="${cssClass}">${label}${suffix}</a>`;
+  }).join('');
+}
+
 
 /* ======================= RENDER ======================= */
 function render(){
@@ -824,13 +860,15 @@ function renderTable(){
   const pageRows = rows.slice(start, start+PAGE_SIZE);
 
   document.getElementById('tableBody').innerHTML = pageRows.map(r => {
-    const links = [];
-    if (r.kuitansi) links.push(`<a href="${r.kuitansi}" target="_blank" rel="noopener">Kuitansi</a>`);
-    if (r.cms) links.push(`<a href="${r.cms}" target="_blank" rel="noopener">CMS</a>`);
-    if (r.billing) links.push(`<a href="${r.billing}" target="_blank" rel="noopener">Billing</a>`);
     
-    // Tampilan tombol untuk bukti transfer dibedakan warnanya agar mencolok
-    const buktiLink = r.bukti ? `<a href="${r.bukti}" target="_blank" rel="noopener" class="btn-bukti">Lihat Bukti</a>` : '<span style="color:#B7C9C5;font-weight:normal;">Belum tersedia</span>';
+    // PEMROSESAN MULTIPLE LINK MELALUI FUNGSI makeLink()
+    const buktiOutput = makeLink(r.bukti, 'Lihat Bukti', 'btn-bukti') || '<span style="color:#B7C9C5;font-weight:normal;">Belum tersedia</span>';
+    
+    const kuitansiLinks = makeLink(r.kuitansi, 'Kuitansi');
+    const cmsLinks = makeLink(r.cms, 'CMS');
+    const billingLinks = makeLink(r.billing, 'Billing');
+    const linksArr = [kuitansiLinks, cmsLinks, billingLinks].filter(x => x);
+    const berkasOutput = linksArr.join('') || '<span style="color:#B7C9C5;font-weight:normal;">–</span>';
 
     return `<tr>
       <td>${r.no}</td>
@@ -841,8 +879,8 @@ function renderTable(){
       <td>${r.mak}</td>
       <td>${r.verifikator}</td>
       <td>${badgeHtml(r.statusRaw)}</td>
-      <td class="links">${buktiLink}</td>
-      <td class="links">${links.join('') || '<span style="color:#B7C9C5;font-weight:normal;">–</span>'}</td>
+      <td class="links">${buktiOutput}</td>
+      <td class="links">${berkasOutput}</td>
     </tr>`;
   }).join('') || `<tr><td colspan="10" style="text-align:center;color:#8AA6A2;padding:30px;">Tidak ada data yang cocok dengan filter.</td></tr>`;
 
