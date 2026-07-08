@@ -383,8 +383,18 @@
 /* ======================= CONFIG ======================= */
 const SHEET_ID = '1QBXsy8ik5v1xwzuBzLJNude9hgDjKLrAfH8ZZxhy40Q';
 
-// KONFIGURASI BARU: Memisahkan secara tegas mana Database Master dan mana Tabel Pelengkap
-const BASE_SHEETS = ['Form Responses 1', 'Jawaban formulir 1', 'Sheet1', null]; 
+// KONFIGURASI PENTING:
+// Saya telah mencabut fallback 'null' yang menyebabkan data salah tertarik.
+// Sistem HANYA akan menarik data UTAMA jika nama tab/sheet di excel Anda persis cocok dengan salah satu nama di bawah ini.
+const BASE_SHEETS = [
+  'Form Responses 1', 
+  'Form responses 1', 
+  'Jawaban formulir 1', 
+  'Jawaban Formulir 1', 
+  'Sheet1'
+]; 
+
+// Daftar sheet tracking yang menampung link Bukti Transfer
 const TRACKING_SHEETS = ['SPBY UP/TUP', 'KKP', 'LS', 'SPBY TUP PF'];
 
 const REFRESH_MS = 5 * 60 * 1000;
@@ -475,9 +485,8 @@ function classify(rawStatus){
 
 /* ======================= DATABASE LOOKUP LOGIC ======================= */
 async function fetchSingleSheet(sheetName) {
-  const url = sheetName
-    ? `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(sheetName)}`
-    : `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json`;
+  // Hanya menarik data yang secara spesifik nama sheet-nya cocok
+  const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(sheetName)}`;
   const res = await fetch(url, { cache: 'no-store' });
   if (!res.ok) throw new Error('HTTP Status ' + res.status);
   const text = await res.text();
@@ -516,7 +525,6 @@ function parseTable(table){
     const uraian = strVal(get(idx.uraian));
     const status = strVal(get(idx.status));
     
-    // Lewati jika baris tersebut murni kosong (hanya tersisa baris kosong di excel)
     if (!uraian && !status && !timestamp) return; 
     
     rows.push({
@@ -542,20 +550,22 @@ function parseTable(table){
 async function fetchAllData(){
   let baseRows = [];
   
-  // 1. CARI DATABASE MASTER (Hanya cari 1 form responses, lalu hentikan pencarian master)
+  // 1. CARI DATABASE MASTER SECARA EKSLUSIF
   for (const name of BASE_SHEETS) {
     try {
       const table = await fetchSingleSheet(name);
       baseRows = parseTable(table);
-      if (baseRows.length > 0) break; 
-    } catch(e) { /* Lanjut cari kandidat master lainnya */ }
+      if (baseRows.length > 0) break; // Berhenti mencari jika sudah menemukan Database Utama
+    } catch(e) { 
+      // Terus mencoba nama sheet kandidat lainnya
+    }
   }
 
   if (baseRows.length === 0) {
-    throw new Error('Database Utama (Form Responses) tidak dapat diakses atau isinya kosong.');
+    throw new Error('Tab/Sheet Utama (Form Responses) tidak ditemukan. Pastikan nama tab persis "Form Responses 1" tanpa spasi berlebih.');
   }
 
-  // 2. KUMPULKAN DATA DARI SHEET TRACKING SECARA PARALEL (sebagai referensi)
+  // 2. KUMPULKAN REFERENSI DARI SHEET TRACKING
   let trackingRows = [];
   const fetchPromises = TRACKING_SHEETS.map(async (name) => {
     try {
@@ -569,24 +579,20 @@ async function fetchAllData(){
     trackingRows = trackingRows.concat(sheetRows);
   });
 
-  // 3. PROSES PENCARIAN & PENEMPELAN (VLOOKUP/LEFT JOIN)
-  // Sistem menjadikan Form Responses sebagai tulang punggung utama
+  // 3. LOGIKA LOOKUP (MENEMPELKAN DATA BUKTI KE MASTER BERDASARKAN KESAMAAN URAIAN)
   baseRows.forEach(baseRow => {
-    // Normalisasi uraian agar tidak meleset hanya karena beda huruf besar/kecil atau spasi dobel
     const baseUraian = (baseRow.uraian || '').toLowerCase().trim().replace(/\s+/g, ' ');
     
-    // Cari uraian (dan nilai) yang serupa di dalam kumpulan sheet Tracking
     const match = trackingRows.find(tRow => {
       const tUraian = (tRow.uraian || '').toLowerCase().trim().replace(/\s+/g, ' ');
-      // Cocokkan persis uraian dan nilainya agar tidak salah tempel dokumen
+      // Harus cocok uraian dan nilainya agar link tidak tertempel pada SPJ yang salah
       return (tUraian === baseUraian) && (tRow.nilai === baseRow.nilai);
     });
 
-    // Jika ditemukan di sheet pelacakan, tempelkan data tambahan ke master
     if (match) {
       if (match.bukti) baseRow.bukti = match.bukti;
       
-      // Jika status/verifikator ternyata diupdate manual oleh tim di sheet tracking, perbarui data master
+      // Membaca status terbaru dari sheet verifikator (jika mereka update di sana)
       if (match.statusRaw && match.statusRaw.trim() !== '') {
         baseRow.statusRaw = match.statusRaw;
       }
@@ -596,7 +602,7 @@ async function fetchAllData(){
     }
   });
 
-  return baseRows;
+  return baseRows; // Memastikan 900+ data dikembalikan utuh
 }
 
 /* ======================= LINK MULTI-PARSER ======================= */
@@ -957,7 +963,7 @@ async function loadData(isManual){
     dot.className = 'dot err';
     label.textContent = 'Gagal sinkron';
     errBanner.style.display = 'flex';
-    document.getElementById('errorMsg').textContent = 'Koneksi ke Sheet gagal. (' + (e.message||e) + ')';
+    document.getElementById('errorMsg').textContent = e.message || 'Koneksi ke Sheet gagal.';
     document.getElementById('loadingOverlay').style.display='none';
   }finally{
     if (isManual) btn.classList.remove('spin');
