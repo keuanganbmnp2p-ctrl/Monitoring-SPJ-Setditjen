@@ -468,7 +468,8 @@ function parseTable(table){
   const idx = {
     no: findColIndex(cols, ['column 1', 'no']),
     timestamp: findColIndex(cols, ['timestamp', 'tanggal']),
-    timKerja: findColIndex(cols, ['tim kerja']),
+    // Ditambahkan keyword alternatif agar lebih akurat menarik kolom Tim Kerja
+    timKerja: findColIndex(cols, ['tim kerja', 'tim', 'user', 'tim/user']),
     uraian: findColIndex(cols, ['uraian']),
     nilai: findColIndex(cols, ['nilai']),
     pic: findColIndex(cols, ['nama pic']),
@@ -542,8 +543,16 @@ async function fetchAllSheets(){
       const existingScore = (existing.bukti ? 2 : 0) + (existing.statusRaw ? 1 : 0);
       const newScore = (r.bukti ? 2 : 0) + (r.statusRaw ? 1 : 0);
       
+      // PERBAIKAN MERGING: Jika data proses lebih update, pastikan field Tim Kerja tidak tertimpa kosong
       if (newScore > existingScore) {
+        if (r.timKerja === '–' && existing.timKerja !== '–') r.timKerja = existing.timKerja;
+        if (r.mak === '–' && existing.mak !== '–') r.mak = existing.mak;
+        if (!r.pic && existing.pic) r.pic = existing.pic;
         rowMap.set(key, r);
+      } else {
+        if (existing.timKerja === '–' && r.timKerja !== '–') existing.timKerja = r.timKerja;
+        if (existing.mak === '–' && r.mak !== '–') existing.mak = r.mak;
+        if (!existing.pic && r.pic) existing.pic = r.pic;
       }
     } else {
       rowMap.set(key, r);
@@ -813,7 +822,6 @@ function renderTable(){
 
   document.getElementById('tableBody').innerHTML = pageRows.map(r => {
     
-    // Tampilan tombol untuk bukti transfer dibedakan warnanya agar mencolok
     const buktiLink = r.bukti ? `<a href="${r.bukti}" target="_blank" rel="noopener" class="btn-bukti">Lihat Bukti</a>` : '<span style="color:#B7C9C5;font-weight:normal;">Belum tersedia</span>';
 
     return `<tr>
