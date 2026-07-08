@@ -259,7 +259,7 @@
 
 <div id="loadingOverlay">
   <div class="spinner"></div>
-  <p>Mengambil data dari beberapa sheet…</p>
+  <p>Menyiapkan Database Utama SPJ…</p>
 </div>
 
 <div class="app">
@@ -382,8 +382,9 @@
 <script>
 /* ======================= CONFIG ======================= */
 const SHEET_ID = '1QBXsy8ik5v1xwzuBzLJNude9hgDjKLrAfH8ZZxhy40Q';
-const TARGET_SHEETS = ['Form Responses 1', 'Jawaban formulir 1', 'Sheet1', 'SPBY UP/TUP', 'KKP', 'LS', 'SPBY TUP PF']; 
-// Kumpulan sheet yang DIUTAMAKAN sebagai sumber Bukti Transfer & Status (karena di sinilah verifikator bekerja)
+
+// KONFIGURASI BARU: Memisahkan secara tegas mana Database Master dan mana Tabel Pelengkap
+const BASE_SHEETS = ['Form Responses 1', 'Jawaban formulir 1', 'Sheet1', null]; 
 const TRACKING_SHEETS = ['SPBY UP/TUP', 'KKP', 'LS', 'SPBY TUP PF'];
 
 const REFRESH_MS = 5 * 60 * 1000;
@@ -472,9 +473,22 @@ function classify(rawStatus){
   return { group:'proses', label: s };
 }
 
-/* ======================= MULTI-SHEET FETCH ======================= */
-function parseTable(table, sheetName){
-  const cols = table.cols.map(c => c.label || '');
+/* ======================= DATABASE LOOKUP LOGIC ======================= */
+async function fetchSingleSheet(sheetName) {
+  const url = sheetName
+    ? `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(sheetName)}`
+    : `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json`;
+  const res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) throw new Error('HTTP Status ' + res.status);
+  const text = await res.text();
+  const jsonStr = text.substring(text.indexOf('{'), text.lastIndexOf('}') + 1);
+  const json = JSON.parse(jsonStr);
+  if (json.status === 'error') throw new Error(json.errors[0].message);
+  return json.table;
+}
+
+function parseTable(table){
+  const cols = table.cols.map(c => c ? c.label || '' : '');
   const idx = {
     no: findColIndex(cols, ['column 1', 'no']),
     timestamp: findColIndex(cols, ['timestamp', 'tanggal']),
@@ -488,7 +502,6 @@ function parseTable(table, sheetName){
     billing: findColIndex(cols, ['billing']),
     verifikator: findColIndex(cols, ['verifikator']),
     status: findColIndex(cols, ['status']),
-    // Penambahan variasi ekstra untuk menangkap seluruh kemungkinan nama kolom Bukti Transfer di sheet verifikator
     bukti: findColIndex(cols, ['bukti transfer', 'upload file bukti transfer', 'link bukti', 'bukti bayar', 'bukti', 'upload bukti']),
     keterangan: findColIndex(cols, ['keterangan']),
   };
@@ -497,15 +510,17 @@ function parseTable(table, sheetName){
   (table.rows || []).forEach((r, i) => {
     const c = r.c || [];
     const get = (j) => (j >= 0 && j < c.length ? c[j] : null);
+    
     const tsCell = get(idx.timestamp);
     const timestamp = tsCell ? parseGvizDate(tsCell.v, tsCell.f) : null;
     const uraian = strVal(get(idx.uraian));
     const status = strVal(get(idx.status));
-    const noVal = strVal(get(idx.no));
     
+    // Lewati jika baris tersebut murni kosong (hanya tersisa baris kosong di excel)
     if (!uraian && !status && !timestamp) return; 
+    
     rows.push({
-      no: noVal || String(i+1),
+      no: strVal(get(idx.no)) || String(i+1),
       timestamp,
       timKerja: strVal(get(idx.timKerja)) || '–',
       uraian: uraian || '(tanpa uraian)',
@@ -519,73 +534,69 @@ function parseTable(table, sheetName){
       statusRaw: status,
       bukti: strVal(get(idx.bukti)),
       keterangan: strVal(get(idx.keterangan)),
-      sheetSource: sheetName // Menandai asal data ini dari sheet mana
     });
   });
   return rows;
 }
 
-async function fetchAllSheets(){
-  let combinedRows = [];
+async function fetchAllData(){
+  let baseRows = [];
   
-  const fetchPromises = TARGET_SHEETS.map(async (sheetName) => {
+  // 1. CARI DATABASE MASTER (Hanya cari 1 form responses, lalu hentikan pencarian master)
+  for (const name of BASE_SHEETS) {
     try {
-      const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(sheetName)}`;
-      const res = await fetch(url, { cache: 'no-store' });
-      if (!res.ok) return [];
-      const text = await res.text();
-      const jsonStr = text.substring(text.indexOf('{'), text.lastIndexOf('}') + 1);
-      const json = JSON.parse(jsonStr);
-      
-      if (json.status === 'error') return []; 
-      if (!json.table || !json.table.cols) return [];
-      
-      return parseTable(json.table, sheetName);
-    } catch(e) {
-      return [];
-    }
+      const table = await fetchSingleSheet(name);
+      baseRows = parseTable(table);
+      if (baseRows.length > 0) break; 
+    } catch(e) { /* Lanjut cari kandidat master lainnya */ }
+  }
+
+  if (baseRows.length === 0) {
+    throw new Error('Database Utama (Form Responses) tidak dapat diakses atau isinya kosong.');
+  }
+
+  // 2. KUMPULKAN DATA DARI SHEET TRACKING SECARA PARALEL (sebagai referensi)
+  let trackingRows = [];
+  const fetchPromises = TRACKING_SHEETS.map(async (name) => {
+    try {
+      const table = await fetchSingleSheet(name);
+      return parseTable(table);
+    } catch(e) { return []; }
   });
   
   const results = await Promise.all(fetchPromises);
   results.forEach(sheetRows => {
-    combinedRows = combinedRows.concat(sheetRows);
+    trackingRows = trackingRows.concat(sheetRows);
   });
 
-  // SMART MERGE & PRIORITIZATION
-  const rowMap = new Map();
-  combinedRows.forEach(r => {
-    const uraianClean = (r.uraian || '').toLowerCase().trim().replace(/\s+/g, ' ').substring(0, 50);
-    const key = r.nilai + '_' + uraianClean; // Menggabungkan nominal dan 50 huruf pertama uraian sbg Identifier
+  // 3. PROSES PENCARIAN & PENEMPELAN (VLOOKUP/LEFT JOIN)
+  // Sistem menjadikan Form Responses sebagai tulang punggung utama
+  baseRows.forEach(baseRow => {
+    // Normalisasi uraian agar tidak meleset hanya karena beda huruf besar/kecil atau spasi dobel
+    const baseUraian = (baseRow.uraian || '').toLowerCase().trim().replace(/\s+/g, ' ');
     
-    if (rowMap.has(key)) {
-      const existing = rowMap.get(key);
-      
-      // Mengecek apakah baris baru ini (r) berasal dari 4 sheet utama
-      const isRTracking = TRACKING_SHEETS.includes(r.sheetSource);
-      const isExistingTracking = TRACKING_SHEETS.includes(existing.sheetSource);
+    // Cari uraian (dan nilai) yang serupa di dalam kumpulan sheet Tracking
+    const match = trackingRows.find(tRow => {
+      const tUraian = (tRow.uraian || '').toLowerCase().trim().replace(/\s+/g, ' ');
+      // Cocokkan persis uraian dan nilainya agar tidak salah tempel dokumen
+      return (tUraian === baseUraian) && (tRow.nilai === baseRow.nilai);
+    });
 
-      // PRIORITAS UTAMA: Jika baris data yang baru ditarik berasal dari 4 sheet utama, TIMPA APAPUN yg ada di Form Responses.
-      if (isRTracking) {
-        if (r.bukti) existing.bukti = r.bukti;
-        if (r.statusRaw && r.statusRaw !== 'Belum Diverifikasi') existing.statusRaw = r.statusRaw;
-        if (r.verifikator && r.verifikator !== 'Belum ditentukan') existing.verifikator = r.verifikator;
-        if (r.kuitansi) existing.kuitansi = r.kuitansi;
-        if (r.cms) existing.cms = r.cms;
-        if (r.billing) existing.billing = r.billing;
-        existing.sheetSource = r.sheetSource; // Update identitas pemegang data utama
+    // Jika ditemukan di sheet pelacakan, tempelkan data tambahan ke master
+    if (match) {
+      if (match.bukti) baseRow.bukti = match.bukti;
       
-      // PRIORITAS KEDUA: Jika keduanya bukan berasal dari sheet tracking, gabungkan data secara normal
-      } else if (!isExistingTracking) {
-        if (!existing.bukti && r.bukti) existing.bukti = r.bukti;
-        if (r.statusRaw && r.statusRaw !== 'Belum Diverifikasi') existing.statusRaw = r.statusRaw;
+      // Jika status/verifikator ternyata diupdate manual oleh tim di sheet tracking, perbarui data master
+      if (match.statusRaw && match.statusRaw.trim() !== '') {
+        baseRow.statusRaw = match.statusRaw;
       }
-
-    } else {
-      rowMap.set(key, r);
+      if (match.verifikator && match.verifikator.trim() !== '' && match.verifikator !== 'Belum ditentukan') {
+        baseRow.verifikator = match.verifikator;
+      }
     }
   });
-  
-  return Array.from(rowMap.values());
+
+  return baseRows;
 }
 
 /* ======================= LINK MULTI-PARSER ======================= */
@@ -933,8 +944,8 @@ async function loadData(isManual){
   errBanner.style.display = 'none';
 
   try{
-    RAW_ROWS = await fetchAllSheets();
-    if (RAW_ROWS.length === 0) throw new Error('Tidak ada data ditemukan di sheet mana pun.');
+    RAW_ROWS = await fetchAllData();
+    if (RAW_ROWS.length === 0) throw new Error('Tidak ada data ditemukan di Database Utama.');
     
     render();
     dot.className = 'dot';
