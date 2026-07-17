@@ -146,7 +146,8 @@
   .charts-grid{
     display:grid;grid-template-columns:1.1fr 1.5fr;gap:20px;margin-top:20px;
   }
-  .charts-grid .row2{grid-column:1 / -1;display:grid;grid-template-columns:1fr 1fr;gap:20px;}
+  /* PERUBAHAN: Membuat row2 menjadi 3 kolom */
+  .charts-grid .row2{grid-column:1 / -1;display:grid;grid-template-columns:repeat(3, 1fr);gap:20px;}
   .panel{
     background:var(--surface);border:1px solid var(--line);border-radius:16px;
     padding:24px;box-shadow:var(--shadow);
@@ -193,16 +194,6 @@
   tbody tr:hover{background:#F7FBFA;}
   td.uraian{max-width:340px;line-height:1.5; color:var(--ink-soft);}
   td.nilai{white-space:nowrap;}
-  
-  td.links a{
-    display:inline-block;
-    color:var(--surface); background:var(--teal-700);
-    padding: 6px 12px; border-radius: 6px;
-    text-decoration:none;font-size:13px;margin:2px 4px 2px 0;
-  }
-  td.links a:hover{background:var(--teal-900);}
-  td.links a.btn-bukti{background:var(--amber-600);color:#fff;}
-  td.links a.btn-bukti:hover{background:#9e5a02;}
   
   .badge{
     display:inline-flex;align-items:center;gap:5px;padding:6px 12px;border-radius:100px;font-size:13px;
@@ -253,7 +244,7 @@
 
 <div id="loadingOverlay">
   <div class="spinner"></div>
-  <p>Mengambil data dari beberapa sheet…</p>
+  <p>Mengambil data dari Google Sheet…</p>
 </div>
 
 <div class="app">
@@ -318,14 +309,20 @@
       </div>
       <div class="chart-box"><canvas id="chartTrend"></canvas></div>
     </div>
+    
+    <!-- PERUBAHAN: 3 Grafik Berdampingan -->
     <div class="row2">
       <div class="panel">
         <div class="panel-head"><h3>Beban kerja verifikator</h3><span class="ptip">per status</span></div>
         <div class="chart-box"><canvas id="chartVerifikator"></canvas></div>
       </div>
       <div class="panel">
-        <div class="panel-head"><h3>SPJ per tim/user</h3><span class="ptip">jumlah dokumen</span></div>
+        <div class="panel-head"><h3>Jumlah Dokumen per Tim</h3><span class="ptip">jumlah SPJ</span></div>
         <div class="chart-box"><canvas id="chartTim"></canvas></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h3>Nilai SPJ per Tim</h3><span class="ptip">dalam Rupiah</span></div>
+        <div class="chart-box"><canvas id="chartNilaiTim"></canvas></div>
       </div>
     </div>
   </div>
@@ -351,7 +348,6 @@
             <th data-key="mak">MAK <span class="arrow"></span></th>
             <th data-key="verifikator">Verifikator <span class="arrow"></span></th>
             <th data-key="status">Status <span class="arrow"></span></th>
-            <th data-key="bukti">Bukti Transfer</th>
           </tr>
         </thead>
         <tbody id="tableBody"></tbody>
@@ -367,7 +363,7 @@
   </div>
 
   <footer>
-    Sumber data: Google Sheet "Monitoring SPJ Masuk" · disegarkan otomatis tiap 5 menit ·
+    Sumber data: Google Sheet "Rekap Master" · disegarkan otomatis tiap 5 menit ·
     <a href="https://docs.google.com/spreadsheets/d/1QBXsy8ik5v1xwzuBzLJNude9hgDjKLrAfH8ZZxhy40Q/edit" target="_blank" rel="noopener">buka sheet asli</a>
   </footer>
 </div>
@@ -375,7 +371,6 @@
 <script>
 /* ======================= CONFIG ======================= */
 const SHEET_ID = '1QBXsy8ik5v1xwzuBzLJNude9hgDjKLrAfH8ZZxhy40Q';
-// Ubah array di bawah ini agar hanya menargetkan sheet Rekap Master
 const TARGET_SHEETS = ['Rekap Master']; 
 const REFRESH_MS = 5 * 60 * 1000;
 
@@ -468,17 +463,16 @@ function parseTable(table){
   const cols = table.cols.map(c => c.label || '');
   const idx = {
     no: findColIndex(cols, ['column 1', 'no']),
-    timestamp: findColIndex(cols, ['timestamp', 'tanggal']),
-    // Ditambahkan keyword alternatif agar lebih akurat menarik kolom Tim Kerja
-    timKerja: findColIndex(cols, ['tim kerja', 'tim', 'user', 'tim/user']),
-    uraian: findColIndex(cols, ['uraian']),
-    nilai: findColIndex(cols, ['nilai']),
-    pic: findColIndex(cols, ['nama pic']),
-    mak: findColIndex(cols, ['mak']),
-    verifikator: findColIndex(cols, ['verifikator']),
+    timestamp: findColIndex(cols, ['timestamp', 'tanggal', 'waktu']),
+    timKerja: findColIndex(cols, ['tim kerja', 'tim', 'user', 'tim/user', 'pemohon']),
+    uraian: findColIndex(cols, ['uraian', 'kegiatan']),
+    nilai: findColIndex(cols, ['nilai', 'nominal']),
+    pic: findColIndex(cols, ['nama pic', 'pic']),
+    mak: findColIndex(cols, ['mak', 'akun']),
+    verifikator: findColIndex(cols, ['verifikator', 'nama verifikator', 'verifikator bpp', 'verifikator ppk', 'petugas']),
     status: findColIndex(cols, ['status']),
     bukti: findColIndex(cols, ['bukti transfer', 'bukti']),
-    keterangan: findColIndex(cols, ['keterangan']),
+    keterangan: findColIndex(cols, ['keterangan', 'catatan']),
   };
 
   const rows = [];
@@ -544,7 +538,6 @@ async function fetchAllSheets(){
       const existingScore = (existing.bukti ? 2 : 0) + (existing.statusRaw ? 1 : 0);
       const newScore = (r.bukti ? 2 : 0) + (r.statusRaw ? 1 : 0);
       
-      // PERBAIKAN MERGING: Jika data proses lebih update, pastikan field Tim Kerja tidak tertimpa kosong
       if (newScore > existingScore) {
         if (r.timKerja === '–' && existing.timKerja !== '–') r.timKerja = existing.timKerja;
         if (r.mak === '–' && existing.mak !== '–') r.mak = existing.mak;
@@ -575,6 +568,7 @@ function render(){
     renderTrendChart();
     renderVerifikatorChart();
     renderTimChart();
+    renderNilaiTimChart(); // PERUBAHAN: Memanggil grafik nilai per tim
   }catch(chartErr){
     console.error('Gagal merender grafik:', chartErr);
     document.querySelectorAll('.chart-box').forEach(box => {
@@ -762,6 +756,60 @@ function renderTimChart(){
   });
 }
 
+/* PERUBAHAN: Fungsi baru untuk merender grafik Nilai SPJ per Tim */
+function renderNilaiTimChart(){
+  const map = {};
+  RAW_ROWS.forEach(r => { 
+    map[r.timKerja] = (map[r.timKerja] || 0) + (r.nilai || 0); 
+  });
+  
+  // Urutkan dari nilai rupiah tertinggi
+  const entries = Object.entries(map).sort((a,b) => b[1] - a[1]).slice(0,8);
+
+  destroyChart('nilaiTim');
+  const ctx = document.getElementById('chartNilaiTim');
+  charts.nilaiTim = new Chart(ctx, {
+    type:'bar',
+    data:{
+      labels: entries.map(e => e[0]),
+      datasets:[{ 
+        data: entries.map(e => e[1]), 
+        backgroundColor:'#A86508', /* Warna yang berbeda agar mudah dibedakan */
+        borderRadius:6, 
+        maxBarThickness:32 
+      }]
+    },
+    options:{
+      maintainAspectRatio:false,
+      scales:{ 
+        x:{ grid:{display:false} }, 
+        y:{ 
+          beginAtZero:true, 
+          grid:{color:'#EEF6F4'}, 
+          ticks: {
+            // Memformat sumbu Y menjadi format Juta/Miliar agar tidak bertumpuk
+            callback: function(value) {
+              if (value >= 1e9) return (value / 1e9).toFixed(1) + ' M';
+              if (value >= 1e6) return (value / 1e6).toFixed(0) + ' Jt';
+              return value;
+            }
+          }
+        } 
+      },
+      plugins:{ 
+        legend:{display:false},
+        tooltip: {
+          callbacks: {
+            label: function(context) {
+              return 'Rp ' + context.raw.toLocaleString('id-ID');
+            }
+          }
+        }
+      }
+    }
+  });
+}
+
 function populateFilterOptions(){
   const statusSel = document.getElementById('filterStatus');
   const verifSel = document.getElementById('filterVerifikator');
@@ -823,8 +871,6 @@ function renderTable(){
 
   document.getElementById('tableBody').innerHTML = pageRows.map(r => {
     
-    const buktiLink = r.bukti ? `<a href="${r.bukti}" target="_blank" rel="noopener" class="btn-bukti">Lihat Bukti</a>` : '<span style="color:#B7C9C5;font-weight:normal;">Belum tersedia</span>';
-
     return `<tr>
       <td>${r.no}</td>
       <td>${fmtDate(r.timestamp)}</td>
@@ -834,9 +880,8 @@ function renderTable(){
       <td>${r.mak}</td>
       <td>${r.verifikator}</td>
       <td>${badgeHtml(r.statusRaw)}</td>
-      <td class="links">${buktiLink}</td>
     </tr>`;
-  }).join('') || `<tr><td colspan="9" style="text-align:center;color:#8AA6A2;padding:30px;">Tidak ada data yang cocok dengan filter.</td></tr>`;
+  }).join('') || `<tr><td colspan="8" style="text-align:center;color:#8AA6A2;padding:30px;">Tidak ada data yang cocok dengan filter.</td></tr>`;
 
   document.getElementById('pageInfo').textContent = `${rows.length.toLocaleString('id-ID')} hasil · halaman ${currentPage} dari ${totalPages}`;
   document.getElementById('prevPage').disabled = currentPage <= 1;
